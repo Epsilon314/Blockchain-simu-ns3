@@ -1,4 +1,4 @@
-#Usage
+# Usage
 A ns3 add-on that helps design and test novel blockchain systems. It focuses on simulating the behavior of consensus protocols and substrate networking features.
 
 ./src is the source code. 
@@ -8,12 +8,12 @@ RTWaxman.conf is an example of brite network model config. file
 under scratch is an example script of this add-on.
 
 
-#Build Guide
+# Build Guide
 Tested on linux ubuntu
-##1. get the latest version of ns3
+## 1. get the latest version of ns3
 Follow [ns3's official guide](https://www.nsnam.org/wiki/Installation).
 
-##2. Install Dependencies
+## 2. Install Dependencies
 Follow [ns3's guide](https://www.nsnam.org/docs/models/html/brite.html) to build the ns-3 specific BRITE repository
 
 Get crypto++
@@ -57,12 +57,12 @@ sudo chmod 644 /usr/local/share/cryptopp/TestVectors/*.txt
 sudo ldconfig
 ```
 
-##3. Copy source files 
+## 3. Copy source files 
 move all files under /src folder to ns3's /src folder
 
-##4 Config & Build
+## 4 Config & Build
 
-###Change config for crypto++
+### Change config for crypto++
 
 open the wscript file located in your ns3 root folder and search
 ```python
