@@ -1,23 +1,38 @@
+// Yiqing Zhu
+// yiqing.zhu.314@gmail.com
+
 #include "ns3/BlockChainTopologyHelper.h"
 
 #include <random>
 #include <chrono>
+#include <algorithm>
 
 #include <functional>
 
-namespace ns3 { 
+// Todo
+// clean up this file
+
+namespace ns3 {
+
+int xor_dis(u_int8_t a, u_int8_t b) {
+	return a ^ b;
+}
 
 
-BlockChainTopologyHelper::BlockChainTopologyHelper(int n) {
+BlockChainTopologyHelper::BlockChainTopologyHelper(int stable_n, int churn_n) {
 
-	nodeN = n;
+	stableNodeN = stable_n;
+	churnNodeN = churn_n;
+	nodeN = stableNodeN + churnNodeN;
+
 	nodes.Create(nodeN);
+
 	InternetStackHelper stack;
 	stack.Install(nodes);
 
-	partiPointLast = nodeN - 1;
-	partiPoint90 = (int) (nodeN - 1) * 0.9;
-	partiPoint70 = (int) (nodeN - 1) * 0.7;
+	partiPointLast = stableNodeN - 1;
+	partiPoint90 = (int) (stableNodeN - 1) * 0.9;
+	partiPoint70 = (int) (stableNodeN - 1) * 0.7;
 
 }
 
@@ -98,9 +113,9 @@ void BlockChainTopologyHelper::setupPeerMetric() {
 // tell application peer address 
 void BlockChainTopologyHelper::setupAppPeer() {
 	Ptr<PBFTCorrect> app;
-	for (int i = 0; i < nodeN; ++i) {
+	for (int i = 0; i < stableNodeN; ++i) {
 		app = installedApps.Get(i)->GetObject<PBFTCorrect>();
-		for (int j = 0; j < nodeN; ++j) {
+		for (int j = 0; j < stableNodeN; ++j) {
 			if (j != i) {
 				Address addr = findAddress(i,j);
 				if (!addr.IsInvalid()) {
@@ -126,6 +141,8 @@ Address BlockChainTopologyHelper::findAddress(int from, int to) {
 		}
 	}
 
+	std::cout << "No address between: " << from << " and " << to << std::endl;
+
 	// return an invalid address
 	return Address();
 
@@ -134,11 +151,11 @@ Address BlockChainTopologyHelper::findAddress(int from, int to) {
 
 // called from external, say topology data provider or generator
 // import topology in terms of link information
+// seconds, bps
 void BlockChainTopologyHelper::insertLinkInfo(int from, int to, double delay, int bw) {
-	
 	LinkInfo link(from, to , delay, bw, 1, 0.0);
+	if (!related_to_churn_node(link)) ++stable_link_count;
 	allLinkInfo.push_back(link);
-
 }
 
 
@@ -153,10 +170,11 @@ void BlockChainTopologyHelper::setOverlayRoute() {
 
 	// choose broadcasters
 	chooseCoreNodes();
+	installCoreList();
 
 	// prepare space
 	tempRouteTable.clear();
-	tempRouteTable.resize(nodeN);
+	tempRouteTable.resize(stableNodeN);
 
 	// generate the application-layer broadcast relay route 
 	switch (topologyGenerateMethod1) {
@@ -169,13 +187,19 @@ void BlockChainTopologyHelper::setOverlayRoute() {
 			generateOverlayRoute_SA();
 		break;
 
+		case DISTRIBUTED:
+			generatedOverlayRoute_DIS();
+		break;
+
+		case KADCAST:
+			generateOverlayRoute_KAD();
+		break;
+
 		default:
 		break;
 	}
-
+	
 	setupPeerMetric();
-	installCoreList();
-
 	installRouteTable(LARGE_PACKET);
 
 
@@ -194,26 +218,49 @@ void BlockChainTopologyHelper::setOverlayRoute() {
 			generateOverlayRoute_SA();
 		break;
 
+		case DISTRIBUTED:
+			generatedOverlayRoute_DIS();
+		break;
+
+		case KADCAST:
+			generateOverlayRoute_KAD();
+		break;
+
 		default:
 		break;
 	}
 
 	installRouteTable(SMALL_PACKET);
 
+}
+
+
+void BlockChainTopologyHelper::installShorestPath () {
 	Ptr<PBFTCorrect> app;
 
-	for (int src = 0; src < nodeN; ++src) {
+	for (int src = 0; src < stableNodeN; ++src) {
 		
 		app = installedApps.Get(src)->GetObject<PBFTCorrect>();
 
-		std::vector<double> D(nodeN);
-		std::vector<int> P(nodeN);
+		std::vector<double> D(stableNodeN);
+		std::vector<int> P(stableNodeN);
 
 		utilSP(D, P, src);
 
 		app->installShortestPathRoute(std::move(P));
 
 	}
+
+	// for (int src = stableNodeN; src < nodeN; ++src) {
+		
+	// 	app = installedApps.Get(src)->GetObject<PBFTCorrect>();
+
+	// 	std::vector<double> D(nodeN);
+	// 	std::vector<int> P(nodeN);
+
+	// 	utilSP(D, P, src);
+	// 	app->installShortestPathRoute(std::move(P));
+	// }
 
 }
 
@@ -222,15 +269,16 @@ void BlockChainTopologyHelper::updateLinkMetric() {
 	for (size_t i = 0, sz = allLinkInfo.size(); i < sz; ++i) {
 
 		auto link = &allLinkInfo[i];
+		if (related_to_churn_node(link)) continue;
 
 		switch (linkMetricSetting) {
 		
 			case DELAY_ONLY:
-			link->linkMetric = link->delay + averageMessageSize * 8 / link->bw;
+			link->linkMetric = link->delay + averageMessageSize * 8 / (link->bw * 1000);
 			break;
 
 			case DELAY_BW_BALANCE:
-			link->linkMetric = link->delay + averageMessageSize * 8 / link->bw * link->share;
+			link->linkMetric = link->delay + averageMessageSize * 8 / (link->bw * link->share * 1000);
 			break; 
 				
 			default:
@@ -245,7 +293,7 @@ void BlockChainTopologyHelper::updateNodeMetric() {
 	// converge
 	int max_round = 10;
 
-	std::vector<double> accumulatedMetric(nodeN, 0), oldAccmulatedMetric(nodeN, 0);
+	std::vector<double> accumulatedMetric(stableNodeN, 0), oldAccmulatedMetric(stableNodeN, 0);
 
 	for (int i = 0; i < max_round; i++) {
 		oldAccmulatedMetric = accumulatedMetric;
@@ -254,6 +302,7 @@ void BlockChainTopologyHelper::updateNodeMetric() {
 		} 
 		for (size_t i = 0, sz = allLinkInfo.size(); i < sz; ++i) {
 		  auto link = allLinkInfo[i];
+			if (related_to_churn_node(&link)) continue;
 			accumulatedMetric[link.nodeA] += link.bw / link.delay;
 			accumulatedMetric[link.nodeA] += 0.05 * oldAccmulatedMetric[link.nodeB];
 			accumulatedMetric[link.nodeB] += link.bw / link.delay;
@@ -276,7 +325,7 @@ void BlockChainTopologyHelper::generateOverlayRoute_PLAIN() {
 	
 	for (size_t i = 0, sz = coreNodeList.size(); i < sz; ++i) {
 		auto source = coreNodeList[i];
-		for (int dst = 0; dst < nodeN; ++dst) {
+		for (int dst = 0; dst < stableNodeN; ++dst) {
 			if (dst != source) {
 				Route r(source, dst, source, source);
 				routeTable[source][source].push_back(r);
@@ -285,7 +334,7 @@ void BlockChainTopologyHelper::generateOverlayRoute_PLAIN() {
 		}
 	}
 
-	updateDepth();
+	// updateDepth();
 
 	updateSequencialMetric();
 
@@ -314,8 +363,8 @@ void BlockChainTopologyHelper::generateOverlayRoute_SPT() {
 
 		updateLinkMetric();
 
-		std::vector<double> D(nodeN);
-		std::vector<int> P(nodeN);
+		std::vector<double> D(stableNodeN);
+		std::vector<int> P(stableNodeN);
 
 		utilSP(D, P, source);
 
@@ -337,11 +386,12 @@ void BlockChainTopologyHelper::generateOverlayRoute_SPT() {
 
 	updateRouteVector();
 
-	updateDepth();
+	// updateDepth();
 
 	updateSequencialMetric();
 
-	// sort tranfer order
+	// sort tranfer order 
+	// todo: baseline should not use global infomation
 
 	for (auto &tree : routeTable) {
 		for (auto &node : tree.second) {
@@ -360,7 +410,7 @@ void BlockChainTopologyHelper::generateOverlayRoute_SA() {
 	// initiate with shortest path
 	generateOverlayRoute_SPT();
 
-	updateDepth();
+	// updateDepth();
 
 	updateSequencialMetric();
 
@@ -369,13 +419,13 @@ void BlockChainTopologyHelper::generateOverlayRoute_SA() {
 
 		// dev 
 		std::cout << "SPT" << std::endl;
-		peekTreeDebug(src, src);
+		peekTreeDebug(src, src, "SPT");
 		std::cout << std::endl;
 
 		// a simple greedy approach
 		// try move the worst leaf node elsewhere to achieve a better min-max delay
 		// stop when such place do not exist
-		while (true) {
+		for (;;) {
 
 			int new_prev = -2;
 			int changer = getWorstMetric(src).first;
@@ -390,13 +440,13 @@ void BlockChainTopologyHelper::generateOverlayRoute_SA() {
 		}
 
 		std::cout << "SA" << std::endl;
-		peekTreeDebug(src, src);
+		peekTreeDebug(src, src, "SA");
 		std::cout << std::endl;
 		peekSubtreeWeightDistribution(src);
 
  	}
 }
- 
+
 
 // ckeck if we can improve node's position
 // return better position or -1 if it is already at best position
@@ -410,10 +460,11 @@ int BlockChainTopologyHelper::checkStability(int source, int node) {
 	int res = -1;
 	int old_prev = getPrev(source, node);
 	
-	breadthFirstTopdownWalk(source, source, [this, source, node, currentWorst, old_prev, &res](int new_prev){
+	breadthFirstTopdownWalk(source, source, [this, source, node, currentWorst, old_prev, &res]
+		(int new_prev){
 		
 		// debug
-		NS_ASSERT(new_prev >= 0 && new_prev < nodeN);
+		NS_ASSERT(new_prev >= 0 && new_prev < stableNodeN);
 
 		if (new_prev == old_prev) {
 			// skip
@@ -454,6 +505,438 @@ int BlockChainTopologyHelper::checkStability(int source, int node) {
 }
 
 
+void BlockChainTopologyHelper::generatedOverlayRoute_DIS() {
+
+	// start from any tree structure
+	// reuse the SPT code for simplicity
+	// rebalance the tree from every node's point of view
+
+	// initiate with shortest path
+	generateOverlayRoute_SPT();
+
+	// updateDepth();
+
+	updateSequencialMetric();
+
+	for (auto src : coreNodeList) {
+
+		std::cout << "SPT" << std::endl;
+		peekTreeDebug(src, src, "SPT");
+		std::cout << std::endl;
+
+		for (;;) {
+			
+			bool changed = false;
+
+			breadthFirstTopdownWalk(src, src, [this, src, &changed](int cursor){
+
+				auto rebalanceCond = getRebalanceCond(src, cursor);
+				auto currentOt = std::get<0>(rebalanceCond);
+				auto vasselCharTable = std::get<1>(rebalanceCond);
+				auto vasselCharTableByWeight = std::get<1>(rebalanceCond);
+				auto vasselCharTableR = std::get<1>(rebalanceCond);
+
+
+				// offload the lightest appendent
+
+				for (auto receiver : vasselCharTable) {
+
+					// std::cout << "grant loop over receiver " << std::get<0>(receiver) << std::endl;
+
+					for (auto grantee : vasselCharTableByWeight) {
+
+					  //	std::cout << "grant loop over grantee " << std::get<0>(grantee) << std::endl;
+
+						if (std::get<0>(grantee) == std::get<0>(receiver)) continue;
+
+						// loi + loj > d_{j,m}
+
+						bool grantCondition;
+						if (getChildNumber(src, std::get<0>(receiver)) != 0) {
+							grantCondition = (currentOt > std::get<2>(receiver)) && 
+								(currentOt - std::get<2>(receiver) > 
+								getNodeTransferDelay(std::get<0>(receiver), std::get<0>(grantee)) 
+								// + getNodeTransferDelay(cursor, std::get<0>(grantee)) 
+								+ delta);
+						}
+						else {
+							grantCondition = (currentOt > std::get<2>(receiver)) &&
+								(currentOt - std::get<2>(receiver) > 
+								getNodeTransferDelay(std::get<0>(receiver), std::get<0>(grantee)) 
+								// + getNodeTransferDelay(cursor, std::get<0>(grantee))
+								+ processingDelay + delta);
+						}
+
+						if (grantCondition) {
+							if (hasLink(std::get<0>(receiver), std::get<0>(grantee))) {
+								
+								// std::cout << "tree " << src << " grant " << std::get<0>(grantee) 
+								// 	<< " to " << std::get<0>(receiver) << std::endl;
+							  // std::cout << "debug " << currentOt << " " << std::get<2>(receiver) 
+								// 	<< " " << getNodeTransferDelay(std::get<0>(receiver), std::get<0>(grantee)) 
+								// 	+ getNodeTransferDelay(cursor, std::get<0>(grantee)) << std::endl;
+
+								changePrev(src, std::get<0>(grantee), std::get<0>(receiver));
+								changed = true;
+								return false;
+							}
+						}
+						else {
+							break;
+						}
+					}				
+				}
+
+				// retract from the slowest appendent
+
+				for (auto target : vasselCharTableR) {
+
+				  //	std::cout << "retract loop over target " << std::get<0>(target) << std::endl;
+
+					std::vector<std::pair<int, double> > weightList;
+					for (auto secondaryVassal : routeTable[src][std::get<0>(target)]) {
+
+						weightList.push_back(
+							std::make_pair(
+								secondaryVassal.dst,
+								std::get<1>(sequentialMetricTable[src][secondaryVassal.dst])
+							)
+						);
+					}
+
+					std::sort(weightList.begin(), weightList.end(), 
+						[=](std::pair<int, double> a, std::pair<int, double> b)
+						{return a.second < b.second;});
+
+					for (auto retractee : weightList) {
+
+						// std::cout << "retract loop over retractee " << retractee.first << std::endl;
+
+						// fixme: retract and grant
+
+						bool retractCondition;
+						retractCondition = (std::get<2>(target) > currentOt) && 
+							(std::get<2>(target) - currentOt > getNodeTransferDelay(cursor, retractee.first)
+							+ delta);
+
+						if (retractCondition) {
+						// if (std::get<1>(target) - currentFt > retractee.second + delta) {
+							if (hasLink(cursor, retractee.first)) {
+
+								// std::cout << "tree " << src << " retract " << retractee.first << " from "
+								// 	 << std::get<0>(target) << std::endl;
+							  // std::cout << "debug " << currentOt << " " << std::get<2>(target) << " "
+								// 	<< getNodeTransferDelay(cursor, retractee.first)
+								// 	+ getNodeTransferDelay(std::get<0>(target), retractee.first) << std::endl;
+
+								changePrev(src, retractee.first, cursor);
+								changed = true;
+								return false;
+							}
+						}
+						else {
+							break;
+						}
+					}
+				}
+
+				return true;
+
+			});
+
+			// nothing can be changed 
+			if (!changed) break;
+
+		}
+
+		std::cout << "DIS" << std::endl;
+		peekTreeDebug(src, src, "DIS");
+		std::cout << std::endl;
+		peekSubtreeWeightDistribution(src);
+	}
+}
+
+void BlockChainTopologyHelper::generateOverlayRoute_KAD() {
+	while (!_generateOverlayRoute_KAD()) {}
+}
+
+bool BlockChainTopologyHelper::_generateOverlayRoute_KAD() {
+
+	// force full mesh
+
+	clearState();
+
+	// force all core
+  NS_ASSERT(chooseCore == ALL);
+	
+	// assign id
+
+	k_bucket.clear();
+	k_bucket.resize(stableNodeN);
+
+	tempKadcastPath.clear();
+	tempKadcastPath.resize(stableNodeN);
+
+	for (int i = 0; i <stableNodeN; ++i) {
+		tempKadcastPath[i].resize(stableNodeN);
+		for (int j = 0; j < stableNodeN; ++j) {
+			tempKadcastPath[i][j] = -1;
+		}
+		tempKadcastPath[i][i] = i;
+	}
+
+	kNodeList.clear();
+
+	for (u_int8_t i = 0;; ++i) {
+		idSpace[i] = i;
+		if (i == 255) break;
+	}
+
+	unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
+  shuffle(idSpace.begin(), idSpace.end(), std::default_random_engine(seed));
+
+	for (int i = 0; i < stableNodeN; ++i) {
+		kNodeList.push_back(std::make_pair(i, idSpace[i]));
+	}
+	
+	// populate k-bucket 
+	// 0 as bootstrip	
+
+
+	for (int newComer = 1; newComer < stableNodeN; ++newComer) {
+
+		// 1. connect to bootstrap node (assign 0)
+
+		int distanceToRoot = xor_dis(getKadId(newComer), getKadId(0));
+
+		if (k_bucket[newComer][disToBucketN(distanceToRoot)].size() < KAD_K) {
+			k_bucket[newComer][disToBucketN(distanceToRoot)].insert(0);
+		}
+		if (k_bucket[0][disToBucketN(distanceToRoot)].size() < KAD_K) {
+			k_bucket[0][disToBucketN(distanceToRoot)].insert(newComer);
+		}
+
+		// 2. find its own id
+
+		kad_find(getKadId(newComer), newComer);
+	}
+
+	// 3. populate k_buckets
+
+	globalPopulateKBucket();
+
+	// std::cout << "kad bucket" << std::endl;
+	// 	for (int i = 0; i < nodeN; ++i) {
+	// 	printKBucket(i);
+	// }
+
+	// install route table
+
+	for (int root = 0; root < stableNodeN; ++root) {
+		generateKadCastRoute(root, root, 8);
+		for (auto i : tempKadcastPath[root]) {
+			if (i == -1) return false;
+		}
+		updateTempRouteVector(tempKadcastPath[root], root);
+	}
+
+	updateRouteVector();
+
+	
+	// send to bigger bucket first
+	for (auto &tree : routeTable) {
+		for (auto &node : tree.second) {
+			std::sort(node.begin(), node.end(),
+				[this](Route a, Route b){return getBucketNumber(a.self, a.dst) 
+				> getBucketNumber(b.self, b.dst);});
+		}
+	}
+	
+	
+
+	// updateDepth();
+
+	updateSequencialMetric();
+
+	for (int src = 0; src < stableNodeN; ++src) {
+		std::cout << "KAD" << std::endl;
+		peekTreeDebug(src, src, "KAD");
+		std::cout << std::endl;
+		peekSubtreeWeightDistribution(src);
+	}
+
+
+
+	return true;
+}
+
+
+// error !
+void BlockChainTopologyHelper::generateKadCastRoute(int r, int s, int h) {
+	for (int bucket = 0; bucket < h; bucket++) { // first h bucket
+		if (!k_bucket[s][bucket].empty()) {
+			
+			// std::cout << "debug route gen: " << r << ',' << s << ',' << h << std::endl;
+			// std::cout << "bucket:" << bucket << std::endl;
+			// std::cout << "set " <<  *(k_bucket[s][bucket].begin()) << " as " << s << std::endl
+			// 	<< std::endl;
+
+			unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
+			srand(seed);
+
+			auto idx = rand() % k_bucket[s][bucket].size();
+			auto delegate = *std::next(k_bucket[s][bucket].begin(), idx);
+			
+			tempKadcastPath[r][delegate] = s;
+			if (bucket > 0) {
+				generateKadCastRoute(r, delegate, bucket);
+			}
+		}
+	}
+}
+
+
+u_int8_t BlockChainTopologyHelper::getKadId(int i) {
+	for (auto k : kNodeList) {
+		if (k.first == i) return k.second;
+	}
+	// error
+	return 0;
+}
+
+
+int BlockChainTopologyHelper::getBucketNumber(int n, int d) {
+	for (int i = 0; i < 8; ++i) {
+		for (auto v: k_bucket[n][i]) {
+			if (d == v) return i;
+		}
+	}
+	return -1;
+}
+
+
+int BlockChainTopologyHelper::disToBucketN(int dis) {
+	int l = 2, i = 0;
+	for(;;) {
+		if (dis < l) return i;
+		l = l << 1;
+		i++;
+	}
+}
+
+
+// k nearset to q node in r's bucket
+std::set<int> BlockChainTopologyHelper::kNearestNode(u_int8_t q, int recv) {
+
+	auto kad_cmp = [](std::pair<int, int> a, std::pair<int, int> b){return a.second < b.second;};
+	
+	std::set<int> rv;
+		
+	// node, dis  
+	std::set<std::pair<int, int>, decltype(kad_cmp)> resultDis(kad_cmp);
+
+	for (auto b: k_bucket[recv]) {
+		for (auto k: b) {
+			resultDis.insert(std::make_pair(k, xor_dis(q, getKadId(k))));
+		}
+	}
+
+	u_int i = 0;
+	for (auto p = resultDis.begin(); p != resultDis.end() && i < KAD_K; p++, i++) {
+		rv.insert(p->first);
+	}
+	return rv;
+
+}
+
+
+void BlockChainTopologyHelper::kad_find(u_int8_t target, int caller) {
+ 
+	auto kad_cmp = +[](std::pair<int, int> a, std::pair<int, int> b){return a.second < b.second;};
+
+	std::set<std::pair<int, int>, decltype(kad_cmp)> knownPeer(kad_cmp);
+	std::set<std::pair<int, int>, decltype(kad_cmp)> query(kad_cmp);
+	std::set<std::pair<int, int>, decltype(kad_cmp)> lastQuery(kad_cmp);
+
+	for (;;) {
+		lastQuery = query;
+
+		knownPeer.clear();
+		for (auto bucket: k_bucket[caller]) {
+			for (auto peer: bucket) {
+				knownPeer.insert(std::make_pair(peer, xor_dis(getKadId(peer), target)));
+			}
+		}
+
+		u_int i = 0;
+		for (auto it = knownPeer.begin(); i < KAD_ALPHA && it != knownPeer.end(); ++i, ++it) {
+			query.insert(*it);
+		}
+
+		if (query == lastQuery) break;
+
+		for (auto peer: query) {
+			
+			auto kNearestPeerList = kNearestNode(target, peer.first);
+
+			for (auto newKnownPeer: kNearestPeerList) {
+
+				if (newKnownPeer == caller) continue;
+
+				// update k_bucket
+				int distance = xor_dis(getKadId(caller), getKadId(newKnownPeer));
+
+				if (k_bucket[caller][disToBucketN(distance)].size() < KAD_K) {  // bucket is not full
+					k_bucket[caller][disToBucketN(distance)].insert(newKnownPeer);
+				}
+
+				if (k_bucket[newKnownPeer][disToBucketN(distance)].size() < KAD_K) {
+					k_bucket[newKnownPeer][disToBucketN(distance)].insert(caller);
+				}
+			}
+		}
+	}
+}
+
+
+void BlockChainTopologyHelper::printKBucket(int i) {
+	int k = 0;
+	std::cout << "node " << i << "'s k-buckets:" << std::endl;
+	for (auto bucket: k_bucket[i]) {
+		std::cout << "bucket" << k++ << ": ";
+		for (auto peer: bucket) {
+			std::cout << peer << " ";
+		}
+		std::cout << std::endl;
+	}
+	std::cout << std::endl;
+}
+
+
+void BlockChainTopologyHelper::globalPopulateKBucket() {
+	for (int peer = 0; peer < stableNodeN; ++peer) {
+		for (int bucketN = 0; bucketN < 8; ++ bucketN) {
+			u_int max_size = (u_int)(1 << bucketN) < KAD_K ? (u_int)(1 << bucketN) : KAD_K;
+			
+			// k_bucket not full
+			u_int bucketSz = k_bucket[peer][bucketN].size();
+			if (bucketSz < max_size) {
+				unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
+				srand(seed);
+				if (bucketSz == 0) {	// empty bucket
+					u_int8_t offset = (u_int8_t) rand() % (1 << bucketN) + (1 << bucketN);
+					u_int8_t address = peer ^ offset;
+					kad_find(address, peer);
+				}
+				else {
+					kad_find(getKadId(*std::next(k_bucket[peer][bucketN].begin(), rand() % bucketSz)), peer);
+				}
+			}
+		}
+	}
+}
+
+
 void BlockChainTopologyHelper::chooseCoreNodes() {
 
 	coreNodeList.clear();
@@ -461,10 +944,10 @@ void BlockChainTopologyHelper::chooseCoreNodes() {
 	switch (chooseCore) {
 		
 		case ALL:
-			for (int i = 0; i < nodeN; ++i) {
+			for (int i = 0; i < stableNodeN; ++i) {
 				coreNodeList.push_back(i);
 			}
-			clusterN = nodeN;
+			clusterN = stableNodeN;
 		break;
 
 		case SPECTRAL_CLUSTERING:
@@ -477,7 +960,8 @@ void BlockChainTopologyHelper::chooseCoreNodes() {
 				aff[i][i] = 0;
 			}
 
-			for (auto link : allLinkInfo) {
+			for (auto &link : allLinkInfo) {
+				if (related_to_churn_node(link)) continue;
 				aff[link.nodeA][link.nodeB] = link.linkMetric;
 				aff[link.nodeB][link.nodeA] = link.linkMetric;
 			}
@@ -526,7 +1010,7 @@ void BlockChainTopologyHelper::chooseCoreNodes() {
 
 
 void BlockChainTopologyHelper::installCoreList() {
-	for (int source = 0; source < nodeN; ++source) {
+	for (int source = 0; source < stableNodeN; ++source) {
 
 		Ptr<PBFTCorrect> app = installedApps.Get(source)->GetObject<PBFTCorrect>();
 
@@ -542,8 +1026,8 @@ void BlockChainTopologyHelper::installCoreList() {
 			// if source is not a core node
 
 
-			std::vector<double> D(nodeN);
-			std::vector<int> P(nodeN);
+			std::vector<double> D(stableNodeN);
+			std::vector<int> P(stableNodeN);
 
 			utilSP(D, P, source);
 
@@ -563,7 +1047,7 @@ void BlockChainTopologyHelper::installCoreList() {
 
 void BlockChainTopologyHelper::setupNodeInfo() {
 
-	for (int i = 0; i < nodeN; ++i) {
+	for (int i = 0; i < stableNodeN; ++i) {
 		NodeInfo node;
 		node.id = i;
 		node.degree = 0;
@@ -571,6 +1055,7 @@ void BlockChainTopologyHelper::setupNodeInfo() {
 	}
 
 	for (auto link = allLinkInfo.begin(); link != allLinkInfo.end(); ++link) {
+		if (link->nodeA >= stableNodeN || link->nodeB >= stableNodeN) continue;
 		for (auto node = allNodeInfo.begin(); node != allNodeInfo.end(); ++node) {
 			if (link->nodeA == node->id || link->nodeB == node->id) {
 				node->degree = node->degree + 1;
@@ -580,36 +1065,58 @@ void BlockChainTopologyHelper::setupNodeInfo() {
 
 	switch (broadwidthModel) {
 	
-	case NODE_P:
-		
-		/**
-		 * if bw is modeled as each node has a maxium outbound bw shared
-		 * equally between its outbound links
-		 */
-
-		for (auto &link : allLinkInfo) {
-
-			// suppose the outbound b.w. is the bottleneck and is capped for each node
-			int degreeA = getDegree(link.nodeA);
-			link.bw = (int) nodeBw / degreeA;
+		case NODE_P:
 			
-		}
+			/**
+			 * if bw is modeled as each node has a maxium outbound bw shared
+			 * equally between its outbound links
+			 */
+
+			for (auto &link : allLinkInfo) {
+				if (link.nodeA >= stableNodeN || link.nodeB >= stableNodeN) continue;
+
+				// suppose the outbound b.w. is the bottleneck and is capped for each node
+				int degreeA = getDegree(link.nodeA);
+				link.bw = (int) nodeBw / degreeA;
+				
+			}
 		break;
-	
-	case NODE_S:
+		
+		case NODE_S:
 
-		for (auto &link : allLinkInfo) {
-			// focus on one link each time
+			for (auto &link : allLinkInfo) {
+				if (link.nodeA >= stableNodeN || link.nodeB >= stableNodeN) continue;
+				// focus on one link each time
 
-			link.bw = (int) nodeBw;
+				link.bw = (int) nodeBw;
 
-		}
+			}
 		break;
 
-	case LINK:
-		// use input value
-	default:
+		case LINK:
+			for (auto &link : allLinkInfo) {
+				if (link.nodeA >= stableNodeN || link.nodeB >= stableNodeN) continue;
+				link.bw /= 1000;
+			}
 		break;
+
+		case CAPPED_BY_NODE:
+			for (auto &link : allLinkInfo) {
+				if (link.nodeA >= stableNodeN || link.nodeB >= stableNodeN) continue;
+
+				link.bw /= 1000;
+
+				if (link.bw > nodeBw) {
+					link.bw = nodeBw;
+				}
+
+				// std::cout << link.bw << ' ';
+			}
+			// std::cout << std::endl;
+		break;
+
+		default:
+			break;
 	}
 
 }
@@ -630,6 +1137,7 @@ int BlockChainTopologyHelper::getDegree(int i) {
 
 void BlockChainTopologyHelper::IncLinkShare(int a, int b) {
   for (auto link = allLinkInfo.begin(); link != allLinkInfo.end(); ++link) {
+		if (link->nodeA >= stableNodeN || link->nodeB >= stableNodeN) continue;
     if ((link->nodeA == a && link->nodeB == b) || (link->nodeB == a && link->nodeA == b)) {
       link->share = link->share + 1;
     }
@@ -639,6 +1147,7 @@ void BlockChainTopologyHelper::IncLinkShare(int a, int b) {
 
 void BlockChainTopologyHelper::DecLinkShare(int a, int b) {
 	for (auto link = allLinkInfo.begin(); link != allLinkInfo.end(); ++link) {
+		if (link->nodeA >= stableNodeN || link->nodeB >= stableNodeN) continue;
     if ((link->nodeA == a && link->nodeB == b) || (link->nodeB == a && link->nodeA == b)) {
       link->share = link->share > 0 ? link->share - 1 : 0;
     }
@@ -650,6 +1159,7 @@ void BlockChainTopologyHelper::DecLinkShare(int a, int b) {
 // refer glink to the requested link
 int BlockChainTopologyHelper::getLink(int a, int b, LinkInfo &glink) {
 	for (auto link = allLinkInfo.begin(); link != allLinkInfo.end(); ++link) {
+		if (link->nodeA >= stableNodeN || link->nodeB >= stableNodeN) continue;
     if ((link->nodeA == a && link->nodeB == b) || (link->nodeB == a && link->nodeA == b)) {
 			glink = *link;
 			// direct link exist
@@ -670,7 +1180,7 @@ bool BlockChainTopologyHelper::hasLink(int a, int b) {
 double BlockChainTopologyHelper::getNodeTransferDelay(int a, int b) {
 	LinkInfo link;
 	NS_ASSERT(1 == getLink(a, b, link)); 
-	return (double) averageMessageSize * 8.0 / (double) link.bw;
+	return (double) averageMessageSize * 8.0 / (double) (link.bw * 1000);
 }
 
 
@@ -685,7 +1195,7 @@ int BlockChainTopologyHelper::getPrev(int root, int node) {
 
 	if (node == root) return -1;
 
-	for (int prevNode = 0; prevNode < nodeN; ++prevNode) {
+	for (int prevNode = 0; prevNode < stableNodeN; ++prevNode) {
 		for (auto r : routeTable[root][prevNode]) {
 			if (r.dst == node) return prevNode;
 		}
@@ -718,56 +1228,23 @@ std::pair<int, double> BlockChainTopologyHelper::getWorstMetric(int root) {
 	}
 }
 
-
-void BlockChainTopologyHelper::setLinkMetricDefination(int m) {
-  linkMetricSetting = m;
-}
-
-
-void BlockChainTopologyHelper::setTopologyGenerationMethod1(int m) {
-	topologyGenerateMethod1 = m;
-}
-
-
-void BlockChainTopologyHelper::setTopologyGenerationMethod2(int m) {
-	topologyGenerateMethod2 = m;
-}
-
-
-void BlockChainTopologyHelper::setChooseCoreMethod(int m) {
-	chooseCore = m;
-}
-
-
-void BlockChainTopologyHelper::setBroadwidthModel(int m) {
-	broadwidthModel = m;
-}
-
-
-void BlockChainTopologyHelper::setClusterN(int n) {
-	clusterN = n;
-}
-
-
-// bytes
-void BlockChainTopologyHelper::setMessageSize(int s) {
-	averageMessageSize = s;
-}
-
-
 void BlockChainTopologyHelper::utilSP(std::vector<double> &D, std::vector<int> &P, int source) {
 
-	NS_ASSERT((int)D.size() == nodeN && nodeN == (int)P.size());
+	NS_ASSERT((int)D.size() == (int)P.size());
 
-	for (size_t d = 0, sz = D.size(); d < sz; ++d) D[d] = std::numeric_limits<double>::infinity();
-	for (size_t p = 0, sz = P.size(); p < sz; ++p) P[p] = -1;
+	int sz = D.size();
+
+	for (size_t d = 0; d < (size_t) sz; ++d) D[d] = std::numeric_limits<double>::infinity();
+	for (size_t p = 0; p < (size_t) sz; ++p) P[p] = -1;
 
 	D[source] = 0;
 	P[source] = source;
 
-	for (int i = 0; i < (int) allLinkInfo.size() - 1; ++i) {
+	for (int i = 0; i < (int) sz - 1; ++i) {
 
 		for (auto link = allLinkInfo.begin(); link != allLinkInfo.end(); ++link) {
+			
+			if (sz == stableNodeN && (link->nodeA >= sz || link->nodeB >= sz)) continue;
 
 			if (D[link->nodeA] + link->linkMetric < D[link->nodeB]) {
 				D[link->nodeB] = D[link->nodeA] + link->linkMetric;
@@ -839,7 +1316,7 @@ void BlockChainTopologyHelper::changePrev(int source, int changer, int new_prev)
 		}
 	}
 
-	updateDepth();
+	// updateDepth();
 
 	// update metric
 	updateSequencialMetric();
@@ -866,7 +1343,20 @@ int BlockChainTopologyHelper::getChildNumber(int src, int node) {
 }
 
 
+// fixme
+// too subtle
 void BlockChainTopologyHelper::updateSequencialMetric() {
+	
+	for (auto src : coreNodeList) {
+		for (auto n = 0; n < stableNodeN; ++n) {
+			std::get<1>(sequentialMetricTable[src][n]) = 0;
+			std::get<2>(sequentialMetricTable[src][n]) = 0;
+			std::get<3>(sequentialMetricTable[src][n]) = 0;
+		}
+	}
+
+	updateDepth();
+	
 
 	for (auto src : coreNodeList) {
 
@@ -879,7 +1369,7 @@ void BlockChainTopologyHelper::updateSequencialMetric() {
 		// not efficient
 		while (depth >= 0) {
 
-			for (int node = 0;  node < nodeN; ++node) {
+			for (int node = 0;  node < stableNodeN; ++node) {
 
 				int nodeDepth = std::get<0>(sequentialMetricTable[src][node]);
 
@@ -894,6 +1384,10 @@ void BlockChainTopologyHelper::updateSequencialMetric() {
 
 					int subWeight = 1;
 
+					if (routeTable[src][node].size() > 0) {
+						subMetric += processingDelay;
+					}
+
 					for (auto r : routeTable[src][node]) {
 						
 						int subNode = r.dst;
@@ -902,11 +1396,18 @@ void BlockChainTopologyHelper::updateSequencialMetric() {
 						double linkDelay = getLinkDelay(node, subNode);
 						
 						// metric is the time interval from the previous node start sending to all nodes
-						// in its sub-tree start receiving
+						// in its sub-tree received 
 						// root node's metric won't be updated right for it is not used
 						std::get<1>(sequentialMetricTable[src][subNode]) += linkDelay;
 
 						subWeight += std::get<4>(sequentialMetricTable[src][subNode]);
+
+						/*
+						std::cout << "debug subMetric: " << src << " " << node << " " << subNode << std::endl;
+						std::cout << std::get<1>(sequentialMetricTable[src][subNode]) << " " << 
+							transferDelay * getSequencialOrder(src, node, subNode) << " " << transferDelay << " "
+							<< getSequencialOrder(src, node, subNode) << std::endl;
+						*/
 
 						//Todo: check if units are uniform
 						subMetric = std::get<1>(sequentialMetricTable[src][subNode])
@@ -943,10 +1444,22 @@ void BlockChainTopologyHelper::updateSequencialMetric() {
 				std::get<3>(sequentialMetricTable[src][n]) = 
 					std::get<3>(sequentialMetricTable[src][prev]) + getLinkDelay(prev, n) +
 					getNodeTransferDelay(prev, n) * getSequencialOrder(src, prev, n);
+				
+				if (prev != src) std::get<3>(sequentialMetricTable[src][n]) += processingDelay;
+
 			}
 			// continue
 			return true;
 		});
+
+		for (size_t i = 0, sz = sequentialMetricTable[src].size(); i < sz; ++i) {
+			double transfer_time = 0.0;
+			for (auto r: routeTable[src][i]) {
+				transfer_time += getNodeTransferDelay(i, r.dst);
+			}
+			std::get<5>(sequentialMetricTable[src][i]) = std::get<3>(sequentialMetricTable[src][i]) 
+				+ transfer_time;
+		}
 
 		// store worst delay to reach
 
@@ -987,7 +1500,8 @@ bool BlockChainTopologyHelper::compareWRTSubtreeMetric(const Route &a, const Rou
 	// std::cout << " a metric: " << sequentialMetricTable[source][nodeA].second
 	//				  << " b metric: " << sequentialMetricTable[source][nodeB].second << std::endl;
 
-	return std::get<1>(sequentialMetricTable[source][nodeA]) > std::get<1>(sequentialMetricTable[source][nodeB]);
+	return std::get<1>(sequentialMetricTable[source][nodeA]) > 
+		std::get<1>(sequentialMetricTable[source][nodeB]);
 
 }
 
@@ -1030,10 +1544,64 @@ void BlockChainTopologyHelper::updateDepth() {
 }
 
 
+std::tuple<
+    double,
+    std::vector<std::tuple<int, double, double, double> >,
+    std::vector<std::tuple<int, double, double, double> >,
+    std::vector<std::tuple<int, double, double, double> > >
+BlockChainTopologyHelper::getRebalanceCond(int src, int cursor) {
+	double currentOt = std::get<5>(sequentialMetricTable[src][cursor]);
+
+	// <id, finish_time, offer_time, weight>
+	std::vector<std::tuple<int, double, double, double> > vasselCharTable;
+	
+	for (auto vassal: routeTable[src][cursor]) {
+		
+		double nFt = std::get<2>(sequentialMetricTable[src][vassal.dst]) + 
+									std::get<3>(sequentialMetricTable[src][vassal.dst]);
+		
+		double nOt = std::get<5>(sequentialMetricTable[src][vassal.dst]);
+
+		double weight = std::get<1>(sequentialMetricTable[src][vassal.dst]);
+
+		vasselCharTable.push_back(std::make_tuple(vassal.dst, nFt, nOt, weight));
+	}
+
+	// its tiny vector, so just use a full copy for different orders
+	std::vector<std::tuple<int, double, double, double> > vasselCharTableByWeight = vasselCharTable;
+	std::vector<std::tuple<int, double, double, double> > vasselCharTableR = vasselCharTable;
+
+	// ascending in finish time
+	std::sort(vasselCharTable.begin(), vasselCharTable.end(),
+		[=](std::tuple<int, double, double, double> a, std::tuple<int, double, double, double> b)
+		{return std::get<1>(a) < std::get<1>(b);});
+	
+	// decending in finish time
+	std::reverse(vasselCharTableR.begin(), vasselCharTableR.end());
+
+	// ascending in weight
+	std::sort(vasselCharTableByWeight.begin(), vasselCharTableByWeight.end(),
+		[=](std::tuple<int, double, double, double> a, std::tuple<int, double, double, double> b)
+		{return std::get<2>(a) < std::get<2>(b);});
+
+	return std::make_tuple(
+		currentOt,
+		vasselCharTable,
+		vasselCharTableByWeight,
+		vasselCharTableR
+	);
+}
+
+
 // insert to a set to remove duplicates
 void BlockChainTopologyHelper::updateTempRouteVector(std::vector<int> &P, int source) {
 
-	for (int i = 0; i < nodeN; ++i) {
+	// std::cout << "route vector for: " << source << " ";
+	// for (auto i : P) std::cout << i << " ";
+	// std::cout << std::endl;
+
+
+	for (int i = 0; i < stableNodeN; ++i) {
 		if (i != source) {				
 
 			Route r;
@@ -1054,7 +1622,7 @@ void BlockChainTopologyHelper::updateTempRouteVector(std::vector<int> &P, int so
 // gather route entry and organize them
 void BlockChainTopologyHelper::updateRouteVector() {
 	
-	for (int node = 0; node < nodeN; ++ node ) {
+	for (int node = 0; node < stableNodeN; ++ node ) {
 		for (auto r = tempRouteTable[node].begin(); r != tempRouteTable[node].end(); ++r) {
 			
 			routeTable[r->src][node].push_back(*r);
@@ -1071,18 +1639,18 @@ void BlockChainTopologyHelper::installRouteTable(int level) {
 
 	// install overlay route to nodes
 
-	for (auto src :coreNodeList) {
-		std::cout << "Install:" << std::endl;
-		peekTreeDebug(src, src);
-		std::cout << std::endl;
-	}
+	// for (auto src :coreNodeList) {
+	// 	std::cout << "Install:" << std::endl;
+	// 	peekTreeDebug(src, src);
+	// 	std::cout << std::endl;
+	// }
 
 	switch (level) {
 	
 		case LARGE_PACKET:
 			for (auto src : coreNodeList) {
 				auto tree = routeTable[src];
-				for (int node = 0; node < nodeN; ++node) {
+				for (int node = 0; node < stableNodeN; ++node) {
 					app = installedApps.Get(node)->GetObject<PBFTCorrect>();
 					for (size_t i = 0, sz = tree[node].size(); i <sz; ++i) {
 						auto r = tree[node][i];
@@ -1098,7 +1666,7 @@ void BlockChainTopologyHelper::installRouteTable(int level) {
 		case SMALL_PACKET:
 			for (auto src : coreNodeList) {
 				auto tree = routeTable[src];
-				for (int node = 0; node < nodeN; ++node) {
+				for (int node = 0; node < stableNodeN; ++node) {
 					app = installedApps.Get(node)->GetObject<PBFTCorrect>();
 					for (size_t i = 0, sz = tree[node].size(); i <sz; ++i) {
 						auto r = tree[node][i];
@@ -1122,43 +1690,35 @@ void BlockChainTopologyHelper::installRouteTable(int level) {
 // and apply func f on each node
 // func f parameters : root id, node id
 // func f return false to early stop the traverse and true to continue
-void BlockChainTopologyHelper::breadthFirstTopdownWalk(int root, int start, std::function<bool(int)> f) {
+void BlockChainTopologyHelper::breadthFirstTopdownWalk(int root, int start,
+	std::function<bool(int)> f) {
 
-	std::vector<int> nextDepth;
+	std::queue<int> nextDepth;
 	
-	nextDepth.push_back(start);
+	nextDepth.push(start);
 	
 	while ( !(nextDepth.empty()) ) {
 
-		int eraseBorder = nextDepth.size();
+		int n = nextDepth.front();
+		nextDepth.pop();
+		
+		// do stuff
+		if ( !f(n) ) return;
 
-		for (int i = 0; i < eraseBorder; ++i) {
-			
-			int n = nextDepth[i];
-
-			// debug
-			NS_ASSERT(n >= 0 && n < nodeN);			
-			
-			// do stuff
-			if ( !f(n) ) return;
-
-			// next level
-			for (size_t i = 0, sz = routeTable[root][n].size(); i < sz; ++i) {
-				nextDepth.push_back(routeTable[root][n][i].dst);
-			}
+		// next level
+		for (size_t i = 0, sz = routeTable[root][n].size(); i < sz; ++i) {
+			nextDepth.push(routeTable[root][n][i].dst);
 		}
-
-		nextDepth.erase(nextDepth.begin(), nextDepth.begin() + eraseBorder);
-
 	}
-
 }
 
 
 void BlockChainTopologyHelper::clearState() {
 
 	tempRouteTable.clear();
-	tempRouteTable.resize(nodeN);
+	tempRouteTable.resize(stableNodeN);
+
+
 
 	routeTable.clear();
 	sequentialMetricTable.clear();
@@ -1166,20 +1726,20 @@ void BlockChainTopologyHelper::clearState() {
 	for (auto src : coreNodeList) {
 
 		if (routeTable.find(src) == routeTable.end()) {
-			std::vector<std::vector<Route> > temp(nodeN);
+			std::vector<std::vector<Route> > temp(stableNodeN);
 			routeTable[src] = temp;
 		}
 		else {
-			routeTable[src].resize(nodeN);
+			routeTable[src].resize(stableNodeN);
 		}
 
 		if (sequentialMetricTable.find(src) == sequentialMetricTable.end()) {
-			std::vector<std::tuple<int, double, double, double, int> > temp(nodeN,
-				std::tuple<int, double, double, double, int>(0,0,0,0,0));
+			std::vector<std::tuple<int, double, double, double, int, double> > temp(stableNodeN,
+				std::tuple<int, double, double, double, int, double>(0,0,0,0,0,0));
 			sequentialMetricTable[src] = temp;
 		}
 		else {
-			sequentialMetricTable[src].resize(nodeN);
+			sequentialMetricTable[src].resize(stableNodeN);
 		}
 
 		treeDepth.clear();
@@ -1192,15 +1752,28 @@ void BlockChainTopologyHelper::clearState() {
 }
 
 
+void BlockChainTopologyHelper::peekTreeDebug(int root, int node, std::string label) {
+	peekTreeDebug(root, node, 0);
+	std::cout << "<" << label << ": ";
+	for (auto l: tempLatencyPrintBuffer) std::cout << l << ", ";
+	std::cout << '>' << std::endl;
+}
+
+
 void BlockChainTopologyHelper::peekTreeDebug(int root, int node, int level) {
 	
 	if (level == 0) {
 		std::cout << "Worst delay: " << getWorstMetric(root).second << std::endl;
+		std::cout << "Theoretical min-max delay: " << getLowerboundDiameter(root) << std::endl;
+
+		tempLatencyPrintBuffer.clear();
 	}
 
 	std::string space(level * 2, ' ');
+	auto latency = std::get<3>(sequentialMetricTable[root][node]);
 	std::cout << space << "Node ID: " << node << ", Time to reach:" 
-		<< std::get<3>(sequentialMetricTable[root][node]) << std::endl;
+		<< latency << std::endl;
+	tempLatencyPrintBuffer.push_back(latency);
 	
 	for (size_t i = 0, sz = routeTable[root][node].size(); i < sz; ++i) {
 		auto r = routeTable[root][node][i];
@@ -1216,13 +1789,49 @@ void BlockChainTopologyHelper::peekSubtreeWeightDistribution(int root) {
 	std::cout << "subtree weight: ";
 	std::vector<int> w(nodeN ,0);
 	
-	for (int i = 0; i < nodeN; ++i) {
+	for (int i = 0; i < stableNodeN; ++i) {
 		w[std::get<4>(sequentialMetricTable[root][i])-1]++;
 	}
-	for (int i = 0; i < nodeN; ++i) {
+	for (int i = 0; i < stableNodeN; ++i) {
 		std::cout << w[i] << " ";
 	}
 	std::cout << std::endl;
+}
+
+
+double BlockChainTopologyHelper::getLowerboundDiameter(int root) {
+
+	double diameter = 0.0;
+
+	std::vector<double> D(stableNodeN);
+	std::vector<int> P(stableNodeN);
+	utilSP(D, P, root);
+
+	for (int i = 0; i < stableNodeN; ++i) {
+
+		if (i == root) continue;
+
+		double dis = 0.0;
+		int c = i;
+		int n;
+
+		for (;;) {
+			n = P[c];
+			dis += getNodeTransferDelay(n, c) + getLinkDelay(n, c) + processingDelay;
+			if (n == root) break;
+			c = n;
+		}
+
+		if (dis > diameter) diameter = dis;
+	}
+
+	return diameter;
+}
+
+
+double BlockChainTopologyHelper::getLowerboundAnalysis(int root) {
+	// todo
+	return -1;
 }
 
 

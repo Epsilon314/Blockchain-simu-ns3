@@ -1,4 +1,11 @@
+// Yiqing Zhu
+// yiqing.zhu.314@gmail.com
+
+#ifndef PBFT_CORRECT_HELPER
+#define PBFT_CORRECT_HELPER
+
 #include "ns3/PBFTCorrectHelper.h"
+#include "ns3/ConsensusMessage.h"
 #include "ns3/string.h"
 #include "ns3/inet-socket-address.h"
 #include "ns3/names.h"
@@ -24,10 +31,10 @@ PBFTCorrectHelper::PBFTCorrectHelper(uint32_t n, double t) {
   delay = 0.05;
   ttl = 2;
   floodN = 1;
-  relayType = BlockChainApplicationBase::DIRECT;
+  relayType = ConsensusMessageBase::DIRECT;
   floodR = true;
   continous = false;
-  transferModel = BlockChainApplicationBase::PARALLEL;
+  transferModel = BlockChainApplicationBase<PBFTMessage>::PARALLEL;
   
 }
 
@@ -47,6 +54,11 @@ void PBFTCorrectHelper::SetAttribute (std::string name, const AttributeValue &va
  */
 void PBFTCorrectHelper::SetTotalNodes(uint32_t n) {
   mTotalNodes = n;
+}
+
+
+void PBFTCorrectHelper::SetVoteNodes(uint32_t n) {
+  mVoteNodes = n;
 }
 
 
@@ -120,6 +132,13 @@ void PBFTCorrectHelper::SetTransferModel(int t) {
   transferModel = t;
 }
 
+void PBFTCorrectHelper::SetOutboundBandwidth(double bw) {
+  outboundBandwidth = bw; 
+}
+
+void PBFTCorrectHelper::setBroadcastDuplicateCount(int c) {
+  broadcastDuplicateCount = c;
+}
 
 /*
  * Install functions
@@ -151,6 +170,7 @@ Ptr<Application> PBFTCorrectHelper::InstallPriv (Ptr<Node> node) {
   app->setTimeout(timeout);
   app->setNodeId(idCounter++);
   app->setTotalNode(mTotalNodes);
+  app->setVote(mVoteNodes);
   app->setBlockSize(blockSz);
   app->setDelay(delay);
   app->setRelayType(relayType);
@@ -162,11 +182,14 @@ Ptr<Application> PBFTCorrectHelper::InstallPriv (Ptr<Node> node) {
   app->setFloodRandomization(floodR);
   app->setContinous(continous);
   app->setTransferModel(transferModel);
+  app->setOutboundBandwidth(outboundBandwidth);
 
   app->updatePrimary();
-
+  app->setBroadcastDuplicateCount(broadcastDuplicateCount);
   node->AddApplication (app);
   return app;
 }
 
 }
+
+#endif // !PBFT_CORRECT_HELPER

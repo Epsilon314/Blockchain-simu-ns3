@@ -1,5 +1,10 @@
+// Yiqing Zhu
+// yiqing.zhu.314@gmail.com
+
+
 #ifndef CONSENSUSMESSAGE_H
 #define CONSENSUSMESSAGE_H
+
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -11,7 +16,7 @@ class ConsensusMessageBase {
 
 protected:
 
-  size_t mHeadSize = 20;  // update this after adding a new field
+  size_t mHeadSize = 28;  // update this after adding a new field
 
   // fields 
   // after adding a new field, shall update mHeadSize,
@@ -25,6 +30,9 @@ protected:
   uint8_t mForwardN;
   uint8_t mTTL;
   uint32_t mSeq;
+
+  // 8bytes
+  double mTs;
 
   // optional fields
   size_t compactHeadSize = 0;
@@ -69,43 +77,33 @@ public:
   std::ostringstream serialization();
   int deserialization(int size, unsigned char const serialInput[]);
 
+  virtual void packHead() = 0;
+  virtual uint64_t uniqueMessageSeq() = 0;
+
+
   // access functions 
 
   inline void setTransportType(uint8_t t) {mTransportType = t;}
-
   inline void setBlockType(uint8_t t) {mBlockType = t;}
-
   inline void setSrcAddr(uint32_t s) {mSrcAddr = s;}
-
   inline void setFromAddr(uint32_t f) {mFromAddr = f;}
-
   inline void setDstAddr(uint32_t d) {mDestinationAddr = d;}
-
   inline void setForwardN(uint8_t n) {mForwardN = n;}
-
   inline void setTTL(uint8_t ttl) {mTTL = ttl;}
-
   inline void setSeq(uint32_t s) {mSeq = s;}
+  inline void setTs(double ts) {mTs = ts;}
 
   inline uint8_t getTransportType() {return mTransportType;}
-
   inline uint8_t getBlockType() {return mBlockType;}
-
   inline uint32_t getSrcAddr() {return mSrcAddr;}
-
   inline uint32_t getFromAddr() {return mFromAddr;}
-
   inline uint32_t getDstAddr() {return mDestinationAddr;}
-
   inline uint8_t getForwardN() {return mForwardN;}
-
   inline uint8_t getTTL() {return mTTL;}
-
   inline uint32_t getSeq() {return mSeq;}
-
-  inline size_t getCompactSize() {return compactHeadSize;}
-
-  inline unsigned char* getCompactHead() {return compactHead;}
+  inline double getTs() {return mTs;}
+  size_t getCompactSize() {return compactHeadSize;}
+  unsigned char* getCompactHead() {return compactHead;}
 
 };
 

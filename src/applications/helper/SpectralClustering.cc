@@ -1,3 +1,6 @@
+// Yiqing Zhu
+// yiqing.zhu.314@gmail.com
+
 #include "SpectralClustering.h"
 #include <iostream>
 

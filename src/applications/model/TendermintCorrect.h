@@ -1,3 +1,8 @@
+// Yiqing Zhu
+// yiqing.zhu.314@gmail.com
+
+//unfinished
+
 #ifndef TENDERMINTCORRECT_H
 #define TENDERMINTCORRECT_H
 

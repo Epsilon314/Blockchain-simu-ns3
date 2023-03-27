@@ -1,3 +1,8 @@
+// Yiqing Zhu
+// yiqing.zhu.314@gmail.com
+
+//unfinished
+
 #include "TendermintCorrect.h"
 #include "ns3/core-module.h"
 #include "ns3/network-module.h"
