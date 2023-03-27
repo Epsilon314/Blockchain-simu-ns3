@@ -1,3 +1,6 @@
+// Yiqing Zhu
+// yiqing.zhu.314@gmail.com
+
 #ifndef PBFTCORRECTHELPER_H
 #define PBFTCORRECTHELPER_H
 
@@ -24,6 +27,7 @@ public:
   ~PBFTCorrectHelper();
 
   void SetTotalNodes(uint32_t n);
+  void SetVoteNodes(uint32_t n);
   void SetTimeout(double t);
   void SetBlockSz(int sz);
   void SetDelay(double d);
@@ -33,6 +37,8 @@ public:
   void SetFloodRandomization(bool b);
   void SetContinous(bool c);
   void SetTransferModel(int t);
+  void SetOutboundBandwidth(double bw);
+  void setBroadcastDuplicateCount(int c);
 
   void SetAttribute (std::string name, const AttributeValue &value);
 
@@ -47,6 +53,8 @@ protected:
   ObjectFactory mFactory;
 
   uint32_t mTotalNodes;
+  uint32_t mVoteNodes;
+
   double timeout;
   int idCounter;
   int blockSz;
@@ -57,6 +65,8 @@ protected:
   bool floodR;
   bool continous;
   int transferModel;
+  double outboundBandwidth;
+  int broadcastDuplicateCount;
     
 };
 

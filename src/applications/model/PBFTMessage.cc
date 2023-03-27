@@ -1,3 +1,7 @@
+// Yiqing Zhu
+// yiqing.zhu.314@gmail.com
+
+
 #include "PBFTMessage.h"
 #include <cryptopp/sm3.h>
 
@@ -228,6 +232,10 @@ Ptr<Packet> PBFTMessage::toPacket() {
    * since it is a simulation and will not face different byteorders
    * which should be handled in real implementations
    */
+
+
+  // set departure timestamp
+  mTs = Simulator::Now().GetSeconds();
 
   Ptr<Packet> pkt;
 

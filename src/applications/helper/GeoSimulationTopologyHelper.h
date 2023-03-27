@@ -6,6 +6,7 @@
 #include <map>
 #include <vector>
 #include <set>
+#include <algorithm>
 
 namespace ns3 {
 
@@ -34,13 +35,14 @@ public:
   };
 
   void setSelectedCity(std::set<uint32_t> s);
-  std::map<uint32_t, std::pair<std::string, uint32_t> > getSelectedCityResult() {
-    return cityList;
-  }
 
   std::vector<DelayInfo> parse();
   
   std::map<uint32_t, std::pair<std::string, uint32_t> > getCityList() {return cityList;}
+
+  std::map<uint32_t, std::pair<std::string, uint32_t> > getCliqueCityList(){return cliqueCityList;} 
+
+  std::vector<DelayInfo> getClique(uint32_t n);
 
 
 private:
@@ -48,7 +50,10 @@ private:
   boost::property_tree::ptree root;
 
   std::vector<DelayInfo> linkList;
+
   std::map<uint32_t, std::pair<std::string, uint32_t> > cityList;
+
+  std::map<uint32_t, std::pair<std::string, uint32_t> > cliqueCityList;
 
   bool selector = false;
   std::set<uint32_t> selectedCityList;
@@ -56,6 +61,10 @@ private:
   void _read();
 
   bool isSelected(uint32_t id);
+
+  bool hasLink(uint32_t a, uint32_t b);
+
+  int cityN;
 
 };
 

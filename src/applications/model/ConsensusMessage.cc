@@ -1,3 +1,6 @@
+// Yiqing Zhu
+// yiqing.zhu.314@gmail.com
+
 #include "ConsensusMessage.h"
 #include <limits>
 
@@ -12,6 +15,7 @@ ConsensusMessageBase::ConsensusMessageBase() :
   mForwardN(0),
   mTTL(0),
   mSeq(0),
+  mTs(0.0),
   compactHeadSize(32),
   compactHead(NULL) {}
 
@@ -25,6 +29,7 @@ ConsensusMessageBase::ConsensusMessageBase(const ConsensusMessageBase& msg) {
   mForwardN = msg.mForwardN;
   mTTL = msg.mTTL;
   mSeq = msg.mSeq;
+  mTs = msg.mTs;
   compactHeadSize = msg.compactHeadSize;
   if (compactHeadSize > 0) {
       compactHead = new unsigned char[compactHeadSize];
@@ -50,6 +55,7 @@ void swap(ConsensusMessageBase& a, ConsensusMessageBase& b) noexcept{
   std::swap(a.mForwardN, b.mForwardN);
   std::swap(a.mTTL, b.mTTL);
   std::swap(a.mSeq, b.mSeq);
+  std::swap(a.mTs, b.mTs);
   std::swap(a.compactHeadSize, b.compactHeadSize);
   std::swap(a.compactHead, b.compactHead);
 }
@@ -64,6 +70,7 @@ void ConsensusMessageBase::reset() {
   mForwardN = 0;
   mTTL = 0;
   mSeq = 0;
+  mTs = 0.0;
   compactHeadSize = 32;
   compactHead = NULL;
 }
@@ -99,6 +106,7 @@ std::ostringstream ConsensusMessageBase::serialization() {
   out.write((const char*) &mForwardN, 1);
   out.write((const char*) &mTTL, 1);
   out.write((const char*) &mSeq, 4);
+  out.write((const char*) &mTs, 8);
   return out;
 }
 
@@ -146,6 +154,11 @@ int ConsensusMessageBase::deserialization(int size, unsigned char const serialIn
   if (size < 0) return 1;
   memcpy(&mSeq, serialInput, 4);
   serialInput += 4;
+
+  size -= 8;
+  if (size < 0) return 1;
+  memcpy(&mTs, serialInput, 8);
+  serialInput += 8;
 
   if (size == 0) {
     // all fields parsed

@@ -1,3 +1,6 @@
+// Yiqing Zhu
+// yiqing.zhu.314@gmail.com
+
 #include "PBFTCorrect.h"
 #include "ns3/core-module.h"
 #include "ns3/network-module.h"
@@ -74,165 +77,6 @@ void PBFTCorrect::StopApplication() {
 }
 
 
-/**
- * Process messages received and parsed correctly as a consensus message
- * Check their header fields and pass to conrespond processing functions
- * 
- * TODO: decouple this part as a standalone module so that it can be reused
- * to evalue network design with other consensus protocols  
- *
- */
-void PBFTCorrect::onMessageCallback(PBFTMessage msg) {
-
-  NS_LOG_INFO("Receive");
-  NS_LOG_INFO("at: "<<nodeId<<" from: "<<msg.getFromAddr());
-
-  /**
-   * First check if is supposed to do some appliaction-layer forwarding stuff
-   * 
-   * pass a copy
-   */
-  applicationLayerRelay(msg);
-
-
-  /**
-   * parse message type
-   * use message pool to store servely out-of-order messages to
-   * avoid a lot of re-transmition; filter out dulicates and detect 
-   * inconsistances 
-   */
-
-   uint8_t count;
-   bool conflict;
-   bool hasfull;
-
-  if (pooledMsg) {
-    std::tie(count, conflict, hasfull) = messageRecvPool.insertWithDetect(msg);
-  }
-
-  switch (msg.getBlockType()) {
-  
-  case ConsensusMessageBase::NORMAL_BLOCK:
-
-    parseMessage(std::move(msg));
-    break;
-  
-  case ConsensusMessageBase::COMPACT_HEAD:
-
-    if (pooledMsg) { 
-      if (!hasfull) {
-        msg.setBlockType(ConsensusMessageBase::REQUIRE);
-        Ptr<Packet> packet = msg.toPacket();
-        std::set<uint32_t> source = messageRecvPool.getSource(msg);
-        if (!source.empty()) {
-          /**
-          * TODO: choose source
-          */
-          sendToPeer(packet, int(*source.begin()));
-        }
-      }
-      else {
-        messageRecvPool.getFullMessage(msg);
-        parseMessage(std::move(msg));
-      }
-    }
-    break;
-  
-  case ConsensusMessageBase::REQUIRE:
-    if (pooledMsg) {
-      if (hasfull) {
-        messageRecvPool.getFullMessage(msg);
-        Ptr<Packet> packet = msg.toPacket();
-        sendToPeer(packet, int(msg.getSrcAddr()));
-      }
-    }
-    break;
-  
-  default:
-    std::cerr << "Bad block type" << std::endl;
-    break;
-  }
-}
-
-
-void PBFTCorrect::applicationLayerRelay(PBFTMessage msg) {
-
-  switch(msg.getTransportType()) {
-
-    case ConsensusMessageBase::DIRECT:
-      if (msg.getDstAddr() != nodeId) {
-        sendToPeer(msg.toPacket(), msg.getDstAddr());
-      }
-      break;
-    
-    case ConsensusMessageBase::CORE_RELAY:
-      if (msg.getTTL() > 0) {
-        // random flood phase 
-        flood(msg);
-      }
-      else {
-        // pass to core node to broadcast
-        if (isCoreNode()) {      
-          msg.setSrcAddr(nodeId);
-          msg.setFromAddr(nodeId);
-          msg.setTransportType(ConsensusMessageBase::RELAY);
-
-          relay(msg);
-        }
-        else {
-          SendToRoot(msg);
-        }
-      }
-      break;
-
-    case ConsensusMessageBase::MIXED:
-      if (msg.getTTL() > 0) {
-        flood(msg);
-      }
-      else {
-
-        // start broadcast here
-        msg.setSrcAddr(nodeId);
-        msg.setFromAddr(nodeId);
-        msg.setTransportType(ConsensusMessageBase::RELAY);
-
-        relay(msg);
-      }
-      break;
-
-    case ConsensusMessageBase::RELAY:
-      relay(msg);
-      break;
-    
-    case ConsensusMessageBase::INFECT_UPON_CONTAGION:
-
-      if (pooledMsg) {
-        if (messageRecvPool.hasMessage(msg) == 0) {
-          // first receive
-          uint8_t ttl = msg.getTTL();
-          if (ttl > 1) {
-            msg.setTTL(ttl - 1);
-          }
-        }
-        if (msg.getTTL() > 0) {
-          floodAnyway(msg);
-        }
-        break;
-      }
-    // INTENDED FALL THROUGH
-
-    case ConsensusMessageBase::FLOOD:
-      flood(msg);
-      break;
-    
-    default:
-      std::cerr << "Bad message transfer type" << std::endl;
-      break;
-
-  }
-}
-
-
 void PBFTCorrect::parseMessage(PBFTMessage msg) {
 
   // if this message is sent to me or to all
@@ -267,6 +111,7 @@ void PBFTCorrect::parseMessage(PBFTMessage msg) {
         onConfirmEpoch(std::move(msg));
         break;
       default:
+        // broadcast test also goes here, for now 
         std::cerr << "Bad type" << std::endl;
         break;
     }
@@ -289,6 +134,9 @@ void PBFTCorrect::onTimeoutCallback() {
   NS_LOG_INFO("time:"<<Simulator::Now().GetSeconds());
   NS_LOG_INFO("");
 
+  std::cout << "timeout" << std::endl << "at:"<<nodeId<<" primary:"<<primaryId << std::endl << "round:"<<round
+    << std::endl << "stage:"<<stage << std::endl << "time:"<<Simulator::Now().GetSeconds() << std::endl << std::endl;
+
   switch (stage)
   {
   case REQUEST:
@@ -308,7 +156,7 @@ void PBFTCorrect::onTimeoutCallback() {
   case CONFIRM_NEWEPOCH:
   // INTENDED
   default:
-    discardRound();
+    // discardRound();
     break;
   }
 }
@@ -346,6 +194,12 @@ void PBFTCorrect::RecvCallback (Ptr<Socket> sock) {
     msg.deserialization(payloadSize, buffer);
 
     if (validateMessage(msg)) {
+
+      if (msgLatencyLogOn) {
+        double latency = Simulator::Now().GetSeconds() - msg.getTs();
+        recvMsgLog.push_back(std::make_tuple(msg.getSignerId(), latency, msg.uniqueMessageSeq()));
+      }
+
       onMessageCallback(std::move(msg));
     }
   }
@@ -369,21 +223,30 @@ void PBFTCorrect::onRequest(PBFTMessage msg) {
   // for simplicity, only response in IDLE now
   // just discard requests in other states
   // Todo : queue and pace requests
-  if (nodeId == primaryId && stage == IDLE) {
+  if (nodeId == primaryId) {
+    if (stage == IDLE) {
+      // reuse the object, save payload before rest
+      // note that there exist a copy in recv pool
+      msg.reset(messageConstantLen);
 
-    // reuse the object, save payload before rest
-    // note that there exist a copy in recv pool
-    msg.reset(messageConstantLen);
+      msg.setType(PRE_PREPARE);
+      msg.setSignerId(nodeId);
+      msg.setRound(round);
 
-    msg.setType(PRE_PREPARE);
-    msg.setSignerId(nodeId);
-    msg.setRound(round);
+      BroadcastPBFT(std::move(msg));
 
-    BroadcastPBFT(std::move(msg));
-
-    stage = PRE_PREPARE;
-    setTimeoutEvent();
+      stage = PRE_PREPARE;
+      setTimeoutEvent();
+    }
+    else {
+      pendingRequest.push(std::move(msg));
+    }
   }
+  else {
+    // forward to promary
+    sendToPrimary(std::move(msg));
+  }
+
 }
 
 
@@ -397,45 +260,10 @@ void PBFTCorrect::onPreprepare(PBFTMessage msg) {
   NS_LOG_INFO("time:"<<Simulator::Now().GetSeconds());
   NS_LOG_INFO("");
 
-  if (msg.getSignerId() == primaryId) {
-    if (msg.getRound() == round) {
-      if (stage == IDLE || stage == REQUEST) {
-        // everything is right
+  if (msg.getSignerId() != primaryId) return; 
 
-        if (firstPreprepare) {
-          firstPreprepare = false;
-          preprepareTime = Simulator::Now().GetSeconds();
-        }
-
-        // reuse the object, save payload before rest
-        // note that there exist a copy in recv pool
-        msg.reset(blockSize);
-
-        msg.setType(PREPARE);
-        msg.setSignerId(nodeId);
-        msg.setRound(round);
-
-        double timeE = Simulator::Now().GetSeconds() - preprepareTime;
-
-        if (timeE >= mDelay) {
-          BroadcastPBFT(std::move(msg));
-        }
-        else {
-          BroadcastPBFT(std::move(msg), mDelay - timeE);
-        }
-
-        stage = PRE_PREPARE;
-        setTimeoutEvent();
-        
-        // in case message received is quite out-of-order
-        prepared();
-      }
-      else {
-        // received a duplicate preprepare
-        // ignore it
-      }
-    }
-    else if (msg.getRound() > round) {
+  if (stage == IDLE || stage == REQUEST) {
+    if (msg.getRound() > round) {
       // perhaps lag back
       // believe the primary
 
@@ -468,20 +296,95 @@ void PBFTCorrect::onPreprepare(PBFTMessage msg) {
 
       // in case message received is quite out-of-order
       prepared();
-
     }
-    else {
+    else if (msg.getRound() < round) {
+      // ignore it
+    }
+    else { // msg.getRound() == round
+      // everything is right
+
+      if (firstPreprepare) {
+        firstPreprepare = false;
+        preprepareTime = Simulator::Now().GetSeconds();
+      }
+
+      // reuse the object, save payload before rest
+      // note that there exist a copy in recv pool
+      msg.reset(blockSize);
+
+      msg.setType(PREPARE);
+      msg.setSignerId(nodeId);
+      msg.setRound(round);
+
+      double timeE = Simulator::Now().GetSeconds() - preprepareTime;
+
+      if (timeE >= mDelay) {
+        BroadcastPBFT(std::move(msg));
+      }
+      else {
+        BroadcastPBFT(std::move(msg), mDelay - timeE);
+      }
+
+      stage = PRE_PREPARE;
+      setTimeoutEvent();
+      
+      // in case message received is quite out-of-order
+      prepared();
+    }
+  }
+  else { // not in IDLE
+    if (msg.getRound() > round) {
+      // perhaps lag back
+      // believe the primary
+
+      // give up states of last round
+      discardRound();
+
+      // if control reaches this branch, it shall always be the first time to hear a prepare
+      firstPreprepare = false;
+      preprepareTime = Simulator::Now().GetSeconds();
+    
+      round = msg.getRound();
+      //Todo: retrieve missing rounds
+
+      msg.reset(blockSize);
+      msg.setType(PREPARE);
+      msg.setSignerId(nodeId);
+      msg.setRound(round);
+
+      double timeE = Simulator::Now().GetSeconds() - preprepareTime;
+
+      if (timeE >= mDelay) {
+        BroadcastPBFT(std::move(msg));
+      }
+      else {
+        BroadcastPBFT(std::move(msg), mDelay - timeE);
+      }
+
+      stage = PRE_PREPARE;
+      setTimeoutEvent();
+
+      // in case message received is quite out-of-order
+      prepared();
+    }
+    else if (msg.getRound() < round) {
       // msg round < node round
       // conflict
       // blame leader with this preprepare and previous quorum cert
-      if (isBackupPrimary()) {
-        sendNewEpoch();
-      }
-      else {
-        sendBlame();
-      }
-    }
 
+      // std::cout << "conflict at: " << nodeId << " local round: " << round 
+      //   << " from: " << msg.getSignerId() << " remote round: " << msg.getRound()
+      //   << " stage: " << stage << std::endl;
+      
+      //if the conflict message is fresh
+      //sendBlame();
+      // else if the conflict message is outdated
+      // just ignore it
+
+    }
+    else { // msg.getRound() == round
+      // ignore
+    }
   }
 }
 
@@ -581,6 +484,9 @@ void PBFTCorrect::committed() {
       sendReply();
       newRound();
     }
+    else {
+      nextRound();
+    }
   }
 }
 
@@ -636,25 +542,35 @@ void PBFTCorrect::onReply(PBFTMessage msg) {
   }
 
   if (nodeId == primaryId && msg.getRound() == round)  {
-    if ( (int) replyCount[round].size() >= quorum) {
+    nextRound();
+  }
+}
 
-      NS_LOG_INFO("MajorityCommitted");
-      NS_LOG_INFO("round:"<<round);
-      NS_LOG_INFO("priamry:"<<primaryId);
-      NS_LOG_INFO("time:"<<Simulator::Now().GetSeconds());
-      NS_LOG_INFO("");
 
-      std::cout<<"<majority conf: "<<round<<" "<<Simulator::Now().GetSeconds()<<" >"<<std::endl<<std::endl;
+void PBFTCorrect::nextRound() {
 
-      // start a new round after honest majority made progress
-      // Todo: piggy-bag this on next pre-prepare message
-      newRound();
+  if (replyCount.size() <= round) {
+    replyCount.resize(round + 10);
+  }
 
-      if (continous) {
-        sendRequest();
-      }
+  if ( (int) replyCount[round].size() >= quorum) {
 
+    NS_LOG_INFO("MajorityCommitted");
+    NS_LOG_INFO("round:"<<round);
+    NS_LOG_INFO("priamry:"<<primaryId);
+    NS_LOG_INFO("time:"<<Simulator::Now().GetSeconds());
+    NS_LOG_INFO("");
+
+    std::cout<<"<majority conf: "<<round<<" "<<Simulator::Now().GetSeconds()<<" >"<<std::endl<<std::endl;
+
+    // start a new round after honest majority made progress
+    // Todo: piggy-bag this on next pre-prepare message
+    newRound();
+
+    if (continous) {
+      sendRequest();
     }
+
   }
 }
 
@@ -676,7 +592,7 @@ void PBFTCorrect::onNewEpoch(PBFTMessage msg) {
     discardRound();
     updatePrimary();
 
-    SendToPrimary(std::move(msg));
+    sendToPrimary(std::move(msg));
   }
   else if (msg.getRound() > round && msg.getSignerId() == msg.getRound() % totalNodes) {
     // Todo: retrieve missing rounds
@@ -693,7 +609,7 @@ void PBFTCorrect::onNewEpoch(PBFTMessage msg) {
     discardRound();
     updatePrimary();
 
-    SendToPrimary(std::move(msg));
+    sendToPrimary(std::move(msg));
   }
 }
 
@@ -704,11 +620,11 @@ void PBFTCorrect::onConfirmEpoch(PBFTMessage msg) {
   NS_LOG_INFO("");
 
   if (incNewEpochCount(msg.getSignerId()) >= quorum) {
-    discardRound();
+    
     updatePrimary();
-
+    discardRound();
     // Todo: resume the request
-    sendRequest();
+    // sendRequest();
   }
 }
 
@@ -729,7 +645,7 @@ void PBFTCorrect::sendRequest() {
 
   std::cout<<"<req: "<<round<<" "<<Simulator::Now().GetSeconds()<<" >"<<std::endl<<std::endl;
 
-  SendToPrimary(std::move(msg));
+  sendToPrimary(std::move(msg));
 
   stage = REQUEST;
 
@@ -747,7 +663,7 @@ void PBFTCorrect::sendReply() {
     msg.setSrcAddr(nodeId);
     msg.setRound(round);
 
-    SendToPrimary(std::move(msg));
+    sendToPrimary(std::move(msg));
   }
 }
 
@@ -834,13 +750,13 @@ int PBFTCorrect::incBlameCount(int n) {
 }
 
 
-int PBFTCorrect::incReplyCount(int round, int n) {
+int PBFTCorrect::incReplyCount(int r, int n) {
 
-  if ( (int) replyCount.size() <= round) {
-    replyCount.resize(round + 10);
+  if ( (int) replyCount.size() <= r) {
+    replyCount.resize(r + 10);
   }
 
-  return incCount(replyCount[round], n);
+  return incCount(replyCount[r], n);
 }
 
 
@@ -859,6 +775,9 @@ void PBFTCorrect::newRound() {
   blameCount.clear();
   newEpochCount.clear();
   messageRecvPool.clear();
+
+  invokePending();
+
 }
 
 
@@ -873,6 +792,9 @@ void PBFTCorrect::discardRound() {
   }
   newEpochCount.clear();
   messageRecvPool.clear();
+
+  invokePending();
+
 }
 
 
@@ -891,38 +813,58 @@ void PBFTCorrect::setTotalNode(int n) {
 }
 
 
+void PBFTCorrect::setVote(int n) {
+  voteNodes = n;
+}
+
+
 void PBFTCorrect::setQuorum() {
   
   //self count as one vote
   //so donot need to add 1
 
-  quorum = (int) (totalNodes * 2.0 / 3.0);
+  quorum = (int) (voteNodes * 2.0 / 3.0);
 }
 
 
-void PBFTCorrect::SendToRoot(PBFTMessage msg) {
-
-  // do not send to self
-  NS_ASSERT(!isCoreNode());
+void PBFTCorrect::sendToRoot(PBFTMessage msg, int duplicates) {
 
   int root = -1;
 
-  // choose the nearest root
-  root = corePeerMetric.top().first;
+  std::vector<std::pair<int, double> >sentList;
+  sentList.reserve(duplicates);
 
-  // sanity check
-  NS_ASSERT(root != -1);
+  for (;!(corePeerMetric.empty() || (int) sentList.size() == duplicates);) {
+    sentList.push_back(corePeerMetric.top());
+    corePeerMetric.pop();
+  }
 
-  msg.setFromAddr(nodeId);
-  Ptr<Packet> packet = msg.toPacket();
+  for (auto r: sentList) {
+    root = r.first;
+    corePeerMetric.push(r);
 
-  sendToPeer(packet, root);
+    if (root == (int) nodeId) continue;
+
+    // sanity check
+    NS_ASSERT(root != -1);
+
+    msg.setFromAddr(nodeId);
+    msg.setDstAddr(root);
+
+    Ptr<Packet> packet = msg.toPacket();
+
+    sendToPeer(packet, root);
+
+  }
+
 }
 
 
 void PBFTCorrect::BroadcastPBFT(PBFTMessage msg) {
 
-	if (relayType == BlockChainApplicationBase::RELAY) {
+  // todo: how to enforce that all possible relayType are processed grammaly ? (like match)
+
+	if (relayType == ConsensusMessageBase::RELAY) {
 
 		msg.setTransportType(ConsensusMessageBase::RELAY);
     msg.setSrcAddr(nodeId);
@@ -931,7 +873,7 @@ void PBFTCorrect::BroadcastPBFT(PBFTMessage msg) {
     relay(std::move(msg));
 	}
 
-  if (relayType == BlockChainApplicationBase::MIXED) {
+  if (relayType == ConsensusMessageBase::MIXED) {
     msg.setTransportType(ConsensusMessageBase::MIXED);
 
     msg.setForwardN(defaultFloodN);
@@ -939,35 +881,43 @@ void PBFTCorrect::BroadcastPBFT(PBFTMessage msg) {
 		flood(std::move(msg));
   }
 
-  if (relayType == BlockChainApplicationBase::CORE_RELAY) {
+  if (relayType == ConsensusMessageBase::CORE_RELAY) {
         
     msg.setTransportType(ConsensusMessageBase::CORE_RELAY);
     msg.setForwardN(defaultFloodN);
     msg.setTTL(defaultTTL);
-
+    
     if (isCoreNode()) {
       msg.setSrcAddr(nodeId);
       msg.setFromAddr(nodeId);
-		  relay(std::move(msg));
+      relay(msg);
     }
-    else {
 
+    if (broadcast_duplicates > 0) {
       if (msg.getTTL() > 0) {
         flood(std::move(msg));
       }
       else {
-        SendToRoot(std::move(msg));
+        sendToRoot(std::move(msg), broadcast_duplicates);
       }
     }
+    
   }
 
   // \cite Fair and Efficient Gossip in Hyperledger Fabric 
-  if (relayType == BlockChainApplicationBase::INFECT_UPON_CONTAGION) {
+  if (relayType == ConsensusMessageBase::INFECT_UPON_CONTAGION) {
     msg.setTransportType(ConsensusMessageBase::INFECT_UPON_CONTAGION);
     msg.setForwardN(defaultFloodN);
     msg.setTTL(defaultTTL);
     floodAnyway(std::move(msg));
   }
+
+  if (relayType == ConsensusMessageBase::FLOOD) {
+    msg.setTransportType(ConsensusMessageBase::FLOOD);
+    msg.setForwardN(defaultFloodN);
+    floodAnyway(std::move(msg));
+  }
+
 }
 
 
@@ -978,15 +928,21 @@ void PBFTCorrect::BroadcastPBFT(PBFTMessage msg, double delay) {
 
 }
 
+void PBFTCorrect::BroadcastTest() {
+  PBFTMessage msg = message(blockSize);
+  BroadcastPBFT(std::move(msg));
+}
+
 
 /**
  * send the packet to the primary node
  */
-void PBFTCorrect::SendToPrimary(PBFTMessage msg) {
+void PBFTCorrect::sendToPrimary(PBFTMessage msg) {
 
   msg.setTransportType(ConsensusMessageBase::DIRECT);
 
   if (primaryId != nodeId) {
+    msg.setDstAddr(primaryId);
     Ptr<Packet> packet = msg.toPacket();
     sendToPeer(packet, primaryId);
   }
@@ -998,109 +954,12 @@ void PBFTCorrect::SendToPrimary(PBFTMessage msg) {
 }
 
 
-/**
- * relay message according to (pre-defined) address book
- */
-void PBFTCorrect::relay(PBFTMessage msg) {
-
-  NS_LOG_INFO("relayMessage");
-  NS_LOG_INFO("at: "<<nodeId<<" souce: "<<msg.getSrcAddr()<<" from: "<<msg.getFromAddr());
-  NS_LOG_INFO("time: "<<Simulator::Now().GetSeconds());
-  NS_LOG_INFO("");
-
-
-  RelayEntry k(msg.getSrcAddr(), msg.getFromAddr());
-
-  msg.setFromAddr(nodeId);
-
-  // use node identifier instead of address just for coding simplicity
-  // actually knowing ip-address is enough 
-
-  Ptr<Packet> packet = msg.toPacket();
-  BroadcastToPeers(packet, k);
-}
-
-
-void PBFTCorrect::flood(PBFTMessage msg) {
-  
-  uint8_t ttl = msg.getTTL();
-
-  NS_ASSERT(ttl > 0);
-
-  if (ttl != 0) ttl = ttl - 1;
-  msg.setTTL(ttl);
-  
-  floodAnyway(std::move(msg));
-
-}
-
-
-void PBFTCorrect::flood(PBFTMessage msg, double delay) {
-
-   void (PBFTCorrect::*fp)(PBFTMessage) = &PBFTCorrect::floodAnyway;
-   delayedFlood = Simulator::Schedule(Seconds(delay), fp, this, std::move(msg));
-   
-}
-
-
-void PBFTCorrect::floodAnyway(PBFTMessage msg) {
-    
-  NS_LOG_INFO("floodMessage");
-  NS_LOG_INFO("at:"<<nodeId<<" souce:"<<msg.getSrcAddr()<<" from:"<<msg.getFromAddr());
-  NS_LOG_INFO("time:"<<Simulator::Now().GetSeconds());
-
-  msg.setFromAddr(nodeId);
-  uint8_t ttl = msg.getTTL();
-  if (ttl != 0) ttl = ttl - 1;
-  msg.setTTL(ttl);
-  
-  Ptr<Packet> packet = msg.toPacket();
-
-  int peerSize = directPeerList.size();
-
-  if (msg.getForwardN() >= peerSize) {
-    sendToPeer(packet, directPeerList);
-  }
-  else {
-
-    std::vector<int> sortBox;
-
-    for (int i = 0; i < peerSize; ++i) {
-      sortBox.push_back(i);
-    }
-
-    if (floodRandomization) {
-      // shuffle the box
-      unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
-      shuffle(sortBox.begin(), sortBox.end(), std::default_random_engine(seed));
-    }
-
-    std::vector<int> randomizedRecvList;
-    for (int i = 0; i < msg.getForwardN(); ++i) {
-      // directPeerList is pre-sorted
-      // if the sortBox is not shuffle, nodes are chosen according to directPeerList
-      // otherwise randomly
-      randomizedRecvList.push_back(directPeerList[sortBox[i]]);
-      NS_LOG_INFO("to:"<<directPeerList[sortBox[i]]);
-    }
-    sendToPeer(packet, randomizedRecvList);
-  }
-  NS_LOG_INFO("");
-}
-
 void PBFTCorrect::setTimeoutEvent() {
 
   clearTimeoutEvent();
 
   void (PBFTCorrect::*fp)(void) = &PBFTCorrect::onTimeoutCallback;
   timeoutEvent = Simulator::Schedule(Seconds(timeout), fp, this);
-}
-
-
-void PBFTCorrect::clearTimeoutEvent() {
-  if (checkEventStatus(timeoutEvent)) {
-    Simulator::Cancel(timeoutEvent);
-  }
 }
 
 
@@ -1121,6 +980,16 @@ void PBFTCorrect::clearScheduledEvent() {
 }
 
 
+void PBFTCorrect::invokePending() {
+
+  if (!pendingRequest.empty()) {
+    onRequest(pendingRequest.front());
+    pendingRequest.pop();
+  }
+
+}
+
+
 void PBFTCorrect::setBlockSize(int sz) {
   blockSize = sz;
 }
@@ -1130,6 +999,10 @@ void PBFTCorrect::setContinous(bool c) {
   continous = c;
 }
 
+
+// fix me 
+// this seq is not maintained properly and may not be unique
+// currently not in use (the uniqueness part) anyway
 
 PBFTMessage PBFTCorrect::message() {
   PBFTMessage msg;
@@ -1145,10 +1018,27 @@ PBFTMessage PBFTCorrect::message(int l) {
 }
 
 
+// why i want a template?
 template<class MessageType>
 bool PBFTCorrect::validateMessage(MessageType& msg) {
   // Unimplemented
   return true;
+}
+
+double PBFTCorrect::getAverageLatency() {
+
+  NS_ASSERT(msgLatencyLogOn == true);
+
+  double latency = 0.0;
+  int count = 0;
+
+  for (auto c : recvMsgLog) {
+    latency += std::get<1>(c);
+    count++;
+  }
+
+  return latency / count;
+
 }
 
 

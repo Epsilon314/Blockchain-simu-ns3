@@ -1,3 +1,6 @@
+// Yiqing Zhu
+// yiqing.zhu.314@gmail.com
+
 #ifndef SPECTRALCLUSTERING_H
 #define SPECTRALCLUSTERING_H
 
